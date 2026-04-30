@@ -1,0 +1,8 @@
+streamlit>=1.30
+opencv-python>=4.8
+easyocr>=1.7
+transformers>=4.40
+torch>=2.1
+pillow>=10.0
+numpy>=1.24,<2.0
+pymupdf>=1.24
