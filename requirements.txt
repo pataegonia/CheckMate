@@ -1,6 +1,8 @@
 streamlit>=1.30
 opencv-python>=4.8
 easyocr>=1.7
+paddlepaddle
+paddleocr
 transformers>=4.40
 torch>=2.1
 pillow>=10.0
