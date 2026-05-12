@@ -136,96 +136,109 @@ def _recover_missing_anchors(
     extra_ocr: list = []
 
     for k in missing:
-        # k와 가장 번호가 가까운 앵커가 있는 컬럼을 후보로 선택
-        nearest = min(found_anchors, key=lambda a: abs(a["num"] - k))
-        col_idx = col_of((nearest["x_left"] + nearest["x_right"]) / 2)
-        col_anchors = by_col[col_idx]
+        # k와 가장 번호가 가까운 앵커가 있는 컬럼만 보면 컬럼 끝(예: 817/818 경계)에서
+        # 반대쪽 컬럼으로 외삽될 수 있으므로 모든 컬럼 후보를 시도한다.
+        candidate_cols = []
+        for ci in range(len(cols)):
+            if by_col.get(ci):
+                score = min(abs(a["num"] - k) for a in by_col[ci])
+                candidate_cols.append((score, ci))
+        candidate_cols.sort()
 
-        prev_a = next((a for a in reversed(col_anchors) if a["num"] < k), None)
-        next_a = next((a for a in col_anchors if a["num"] > k), None)
+        best_for_k: Optional[dict] = None
 
-        # 같은 컬럼의 평균 gap 추정 (번호 1당 y 픽셀)
-        if len(col_anchors) >= 2:
-            gaps = []
-            for i in range(len(col_anchors) - 1):
-                dy = col_anchors[i + 1]["y_top"] - col_anchors[i]["y_top"]
-                dn = max(1, col_anchors[i + 1]["num"] - col_anchors[i]["num"])
-                gaps.append(dy / dn)
-            typical = sum(gaps) / len(gaps)
-        else:
-            typical = 350.0
+        for _score, col_idx in candidate_cols:
+            col_anchors = by_col[col_idx]
 
-        # 외삽(prev/next 한쪽만 있는 경우 — 컬럼 맨 위/맨 아래)은 위치 불확실성이 크므로 ROI를 넉넉히
-        extrapolate = not (prev_a and next_a)
-        if prev_a and next_a:
-            frac = (k - prev_a["num"]) / max(1, next_a["num"] - prev_a["num"])
-            pred_y = int(prev_a["y_top"] + frac * (next_a["y_top"] - prev_a["y_top"]))
-        elif prev_a:
-            pred_y = int(prev_a["y_top"] + (k - prev_a["num"]) * typical)
-        elif next_a:
-            pred_y = int(next_a["y_top"] - (next_a["num"] - k) * typical)
-        else:
-            continue
+            prev_a = next((a for a in reversed(col_anchors) if a["num"] < k), None)
+            next_a = next((a for a in col_anchors if a["num"] > k), None)
 
-        cx1, cx2 = cols[col_idx]
-        # 문제번호는 컬럼 좌측 ~45% 안에 위치. 외삽이면 ROI 더 넓게.
-        pad_up = 200 if extrapolate else 80
-        pad_down = 100 if extrapolate else 80
-        roi_y1 = max(0, pred_y - pad_up)
-        roi_y2 = min(h, pred_y + pad_down)
-        roi_x1 = cx1
-        roi_x2 = min(cx2, cx1 + int((cx2 - cx1) * 0.45))
-        roi = image_bgr[roi_y1:roi_y2, roi_x1:roi_x2]
-        if roi.size == 0:
-            continue
+            # 같은 컬럼의 평균 gap 추정 (번호 1당 y 픽셀)
+            if len(col_anchors) >= 2:
+                gaps = []
+                for i in range(len(col_anchors) - 1):
+                    dy = col_anchors[i + 1]["y_top"] - col_anchors[i]["y_top"]
+                    dn = max(1, col_anchors[i + 1]["num"] - col_anchors[i]["num"])
+                    gaps.append(dy / dn)
+                typical = sum(gaps) / len(gaps)
+            else:
+                typical = 350.0
 
-        # 전처리 변형: 업스케일 + 대비강화 + 그레이스케일
-        up = cv2.resize(roi, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
-        contrast = cv2.convertScaleAbs(up, alpha=1.6, beta=15)
-        gray = cv2.cvtColor(up, cv2.COLOR_BGR2GRAY)
-        gray_3ch = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        variants = [up, contrast, gray_3ch]
+            # 외삽(prev/next 한쪽만 있는 경우 — 컬럼 맨 위/맨 아래)은 위치 불확실성이 크므로 ROI를 넉넉히
+            extrapolate = not (prev_a and next_a)
+            if prev_a and next_a:
+                frac = (k - prev_a["num"]) / max(1, next_a["num"] - prev_a["num"])
+                pred_y = int(prev_a["y_top"] + frac * (next_a["y_top"] - prev_a["y_top"]))
+            elif prev_a:
+                pred_y = int(prev_a["y_top"] + (k - prev_a["num"]) * typical)
+            elif next_a:
+                pred_y = int(next_a["y_top"] - (next_a["num"] - k) * typical)
+            else:
+                continue
 
-        best: Optional[dict] = None
-        for var in variants:
-            # 1) 숫자만 (allowlist) — 가장 깨끗한 결과
-            # 2) 일반 OCR + fuzzy 글자→숫자 변환 (보조)
-            for kwargs in (
-                {"allowlist": "0123456789", "text_threshold": 0.3, "low_text": 0.15, "link_threshold": 0.2},
-                {"text_threshold": 0.3, "low_text": 0.15, "link_threshold": 0.2},
-            ):
-                res = reader.readtext(var, **kwargs)
-                # 이 누락 번호 한정으로 substring 매칭 (예: '08179'에서 '0817' 찾기)
-                target_forms = (f"0{k}", str(k))
-                for box, text, conf in res:
-                    xs0 = [p[0] / 2.5 + roi_x1 for p in box]
-                    ys0 = [p[1] / 2.5 + roi_y1 for p in box]
-                    extra_ocr.append((
-                        [(int(x), int(y)) for x, y in zip(xs0, ys0)],
-                        text,
-                        conf,
-                    ))
-                    runs = _extract_digit_runs(text)
-                    matched = any(form in run for run in runs for form in target_forms)
-                    if matched:
-                        cand = {
-                            "num": k,
-                            "x_left": int(min(xs0)),
-                            "x_right": int(max(xs0)),
-                            "y_top": int(min(ys0)),
-                            "y_bottom": int(max(ys0)),
-                            "conf": float(conf),
-                            "text": text,
-                            "recovered": True,
-                        }
-                        if best is None or cand["conf"] > best["conf"]:
-                            best = cand
-                if best is not None and best["conf"] > 0.5:
+            cx1, cx2 = cols[col_idx]
+            # 문제번호는 컬럼 좌측 ~55% 안에 위치. 외삽이면 ROI 더 넓게.
+            pad_up = 220 if extrapolate else 90
+            pad_down = 180 if extrapolate else 90
+            roi_y1 = max(0, pred_y - pad_up)
+            roi_y2 = min(h, pred_y + pad_down)
+            roi_x1 = cx1
+            roi_x2 = min(cx2, cx1 + int((cx2 - cx1) * 0.55))
+            roi = image_bgr[roi_y1:roi_y2, roi_x1:roi_x2]
+            if roi.size == 0:
+                continue
+
+            # 전처리 변형: 업스케일 + 대비강화 + 그레이스케일
+            up = cv2.resize(roi, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+            contrast = cv2.convertScaleAbs(up, alpha=1.6, beta=15)
+            gray = cv2.cvtColor(up, cv2.COLOR_BGR2GRAY)
+            gray_3ch = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            variants = [up, contrast, gray_3ch]
+
+            best: Optional[dict] = None
+            for var in variants:
+                # 1) 숫자만 (allowlist) — 가장 깨끗한 결과
+                # 2) 일반 OCR + fuzzy 글자→숫자 변환 (보조)
+                for kwargs in (
+                    {"allowlist": "0123456789", "text_threshold": 0.25, "low_text": 0.12, "link_threshold": 0.15},
+                    {"text_threshold": 0.25, "low_text": 0.12, "link_threshold": 0.15},
+                ):
+                    res = reader.readtext(var, **kwargs)
+                    # 이 누락 번호 한정으로 substring 매칭 (예: '08179'에서 '0817' 찾기)
+                    target_forms = (f"0{k}", str(k))
+                    for box, text, conf in res:
+                        xs0 = [p[0] / 2.5 + roi_x1 for p in box]
+                        ys0 = [p[1] / 2.5 + roi_y1 for p in box]
+                        extra_ocr.append((
+                            [(int(x), int(y)) for x, y in zip(xs0, ys0)],
+                            text,
+                            conf,
+                        ))
+                        runs = _extract_digit_runs(text)
+                        matched = any(form in run for run in runs for form in target_forms)
+                        if matched:
+                            cand = {
+                                "num": k,
+                                "x_left": int(min(xs0)),
+                                "x_right": int(max(xs0)),
+                                "y_top": int(min(ys0)),
+                                "y_bottom": int(max(ys0)),
+                                "conf": float(conf),
+                                "text": text,
+                                "recovered": True,
+                            }
+                            if best is None or cand["conf"] > best["conf"]:
+                                best = cand
+                    if best is not None and best["conf"] > 0.45:
+                        break
+                if best is not None and best["conf"] > 0.45:
                     break
-            if best is not None and best["conf"] > 0.5:
-                break
-        if best is not None:
-            recovered.append(best)
+            if best is not None:
+                if best_for_k is None or best["conf"] > best_for_k["conf"]:
+                    best_for_k = best
+
+        if best_for_k is not None:
+            recovered.append(best_for_k)
 
     return recovered, extra_ocr
 
@@ -425,6 +438,28 @@ def _isolation_score(cy: float, cx: float, all_boxes: list, ignore_box=None) -> 
     return best if best != float("inf") else 0.0
 
 
+def _trailing_handwritten_answer(text: str) -> Optional[str]:
+    """텍스트의 마지막 한글 글자 이후에 매달린 짧은 답 후보 추출.
+    예: '...실수이다.)4' → '4' (학생이 본문 끝에 답을 적은 경우 OCR이 한 박스로 합침)"""
+    if not text:
+        return None
+    last_korean = -1
+    for i in range(len(text) - 1, -1, -1):
+        ch = text[i]
+        if "가" <= ch <= "힣":
+            last_korean = i
+            break
+    tail = text[last_korean + 1:] if last_korean >= 0 else text
+    tail = tail.strip(" .,()[]?!:")
+    if not tail or len(tail) > 8:
+        return None
+    if not re.search(r"[\d=<>≤≥+\-xX]", tail):
+        return None
+    if re.search(r"[가-힣]", tail):
+        return None
+    return tail
+
+
 def _filter_handwritten_candidates(
     res: list[tuple[list, str, float]],
     crop_shape: tuple[int, int, int],
@@ -444,27 +479,33 @@ def _filter_handwritten_candidates(
     for box, text, conf in res:
         if not text:
             continue
+        raw = text
         t = text.strip()
-        if not t or len(t) > 8:
-            continue
-        # 인쇄된 문제번호 자체 제거
-        if any(form in t for form in forms_to_skip):
+        if not t:
             continue
         cy = sum(p[1] for p in box) / 4
         cx = sum(p[0] for p in box) / 4
         # 좌상단 (문제번호 태그 영역)
         if cx < w * 0.18 and cy < h * 0.13:
             continue
-        # 한글 2자 이상이면 본문/보기
-        if re.search(r"[가-힣]{2,}", t):
+
+        is_korean_body = bool(re.search(r"[가-힣]{2,}", t))
+        if is_korean_body:
+            # 본문에 답이 매달린 경우만 trailing 추출 ('...실수이다.)4' → '4')
+            tail = _trailing_handwritten_answer(raw)
+            if tail and tail not in forms_to_skip:
+                # 위치는 trailing 부분 추정이 어렵지만 conf는 살짝 깎아둠 (확신 낮음)
+                cands.append((cy, cx, tail, float(conf) * 0.9))
             continue
-        # 답에 등장 가능한 글자 포함 여부
+
+        if len(t) > 8:
+            continue
+        if any(form in t for form in forms_to_skip):
+            continue
         if not re.search(r"[\d=<>≤≥+\-xXyz]", t):
             continue
-        # 인쇄 패턴 (①~⑤ 단독 등)
         if re.fullmatch(r"[①-⑳][.,]?", t):
             continue
-        # 단일 한글 자음만은 옵션 마커 가능 — pass
         cands.append((cy, cx, t, float(conf)))
     return cands
 
@@ -475,12 +516,85 @@ def _normalize_handwriting_artifacts(text: str) -> str:
     - "≤" → "<=" (시각적 동등하지만 답 dict 표기)
     - 공백/유니코드 마이너스 흡수
     """
-    s = text.strip().replace(" ", "")
-    s = s.replace("−", "-").replace("―", "-")
+    s = str(text or "").strip().replace(" ", "")
+    replacements = {
+        "−": "-",
+        "―": "-",
+        "–": "-",
+        "—": "-",
+        "﹣": "-",
+        "－": "-",
+        "＜": "<",
+        "〈": "<",
+        "‹": "<",
+        "≤": "<=",
+        "≦": "<=",
+        "＞": ">",
+        "〉": ">",
+        "›": ">",
+        "≥": ">=",
+        "≧": ">=",
+        "＝": "=",
+        "×": "x",
+        "χ": "x",
+        "X": "x",
+    }
+    for src, dst in replacements.items():
+        s = s.replace(src, dst)
     # x 글자가 7로, < 가 ∠/L로 잘못 읽힌 경우만 좁게 적용 (`7` 다음에 < 같은 부등호 부호가 와야 함)
     s = re.sub(r"7\s*[∠L]", "x<", s)
     s = re.sub(r"7\s*>", "x>", s)
+    # OCR이 x를 생략하고 부등호식만 읽은 경우는 유지하되, 흔한 'xL-2'류를 보정
+    s = re.sub(r"^x[∠L](-?\d+)$", r"x<\1", s)
     return s
+
+
+def _answer_focus_crop(crop_bgr: np.ndarray) -> Optional[np.ndarray]:
+    """문항 crop 안에서 손글씨 답안으로 보이는 영역만 조금 더 확대해서 반환."""
+    h, w = crop_bgr.shape[:2]
+    if h < 20 or w < 20:
+        return None
+
+    # 상단 문제 본문을 어느 정도 제외하고 손글씨/마킹 후보를 찾는다.
+    mask = _build_dark_ink_mask(crop_bgr, [], top_skip=max(50, int(h * 0.22)))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    n, _labels, stats, _cent = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    components = []
+    for i in range(1, n):
+        x = int(stats[i, cv2.CC_STAT_LEFT])
+        y = int(stats[i, cv2.CC_STAT_TOP])
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < 20:
+            continue
+        if bw > w * 0.85 or bh > h * 0.55:
+            continue
+        components.append((x, y, x + bw, y + bh, area))
+
+    if not components:
+        return None
+
+    # 너무 많은 인쇄 영역이 섞이면 전체 crop이 더 안전하다.
+    x1 = min(c[0] for c in components)
+    y1 = min(c[1] for c in components)
+    x2 = max(c[2] for c in components)
+    y2 = max(c[3] for c in components)
+    if (x2 - x1) * (y2 - y1) > w * h * 0.45:
+        return None
+
+    pad_x = max(24, int((x2 - x1) * 0.55))
+    pad_y = max(24, int((y2 - y1) * 0.90))
+    x1 = max(0, x1 - pad_x)
+    y1 = max(0, y1 - pad_y)
+    x2 = min(w, x2 + pad_x)
+    y2 = min(h, y2 + pad_y)
+    focus = crop_bgr[y1:y2, x1:x2]
+    if focus.size == 0:
+        return None
+    return cv2.resize(focus, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
 
 
 def _ocr_mask_region(crop_bgr: np.ndarray, mask: np.ndarray) -> list[tuple[float, str, float]]:
@@ -523,108 +637,305 @@ def _ocr_mask_region(crop_bgr: np.ndarray, mask: np.ndarray) -> list[tuple[float
 _OPTION_MARKS = {"①": "1", "②": "2", "③": "3", "④": "4", "⑤": "5"}
 
 
+def _build_dark_ink_mask(
+    crop_bgr: np.ndarray,
+    ocr_boxes: list,
+    top_skip: int = 60,
+    suppress_conf_min: float = 0.65,
+) -> np.ndarray:
+    """학생 손글씨용 마스크: 저-Value(어두운) 픽셀 - 고신뢰 인쇄 텍스트 OCR 박스.
+    - 상단 top_skip은 인쇄 태그 영역으로 제외
+    - conf >= suppress_conf_min 인 박스만 마스크에서 차감 (학생이 쓴 마크는 보통 OCR이 낮은 conf로 읽음)
+    - 한글 2자 이상 포함된 박스는 무조건 인쇄 본문 → 차감"""
+    h, w = crop_bgr.shape[:2]
+    hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
+    dark = cv2.inRange(hsv, (0, 0, 0), (180, 255, 80))
+    color_ink = _detect_handwriting_mask(crop_bgr)
+    mask = cv2.bitwise_or(dark, color_ink)
+    if top_skip > 0:
+        mask[:top_skip, :] = 0
+
+    suppress = np.zeros_like(mask)
+    pad = 4
+    for box, text, conf in ocr_boxes:
+        t = text or ""
+        # 옵션 마커가 들어간 박스는 차감하지 않음 (학생이 그 위에 동그라미/체크할 수 있음)
+        if any(ch in t for ch in _OPTION_MARKS):
+            continue
+        is_korean_body = bool(re.search(r"[가-힣]{2,}", t))
+        if (conf is None or conf >= suppress_conf_min) or is_korean_body:
+            xs = [int(p[0]) for p in box]; ys = [int(p[1]) for p in box]
+            x1 = max(0, min(xs) - pad); y1 = max(0, min(ys) - pad)
+            x2 = min(w, max(xs) + pad); y2 = min(h, max(ys) + pad)
+            suppress[y1:y2, x1:x2] = 255
+    mask = cv2.bitwise_and(mask, cv2.bitwise_not(suppress))
+    return mask
+
+
+def _infer_missing_option_positions(
+    detected: list[tuple[float, float, str]]
+) -> list[tuple[float, float, str]]:
+    """검출된 옵션 layout(행/열)을 분석해 누락 옵션의 추정 위치 반환.
+    가정: 옵션은 행 단위로 좌→우, 위→아래 번호가 매겨지고 같은 열은 x가 비슷함."""
+    if not detected:
+        return []
+    detected_digits = {d[2] for d in detected}
+    missing = [d for d in "12345" if d not in detected_digits]
+    if not missing:
+        return []
+
+    # 행 그룹화 (y 비슷한 것끼리)
+    detected_by_y = sorted(detected, key=lambda d: d[1])
+    rows: list[list[tuple[float, float, str]]] = []
+    for d in detected_by_y:
+        if rows and abs(d[1] - rows[-1][-1][1]) < 35:
+            rows[-1].append(d)
+        else:
+            rows.append([d])
+    # 각 행 좌→우 정렬, 행 평균 y 계산
+    row_info = []
+    for r in rows:
+        r_sorted = sorted(r, key=lambda d: d[0])
+        avg_y = sum(d[1] for d in r_sorted) / len(r_sorted)
+        row_info.append((avg_y, r_sorted))
+    row_info.sort(key=lambda ri: ri[0])
+
+    # 글로벌 열 슬롯: 모든 행의 x 위치를 모아 중복 비슷한 것끼리 묶음
+    all_xs = sorted(d[0] for r in rows for d in r)
+    col_slots: list[float] = []
+    col_threshold = 80
+    for x in all_xs:
+        if not col_slots or abs(x - col_slots[-1]) > col_threshold:
+            col_slots.append(x)
+        else:
+            # 평균으로 갱신
+            col_slots[-1] = (col_slots[-1] + x) / 2
+
+    def column_index(x: float) -> int:
+        return min(range(len(col_slots)), key=lambda i: abs(col_slots[i] - x))
+
+    # 검출된 옵션의 행/열 매핑
+    pos_to_row = {}
+    for ri_idx, (_, r) in enumerate(row_info):
+        for d in r:
+            pos_to_row[d[2]] = ri_idx
+
+    inferred: list[tuple[float, float, str]] = []
+    for m in missing:
+        m_int = int(m)
+        prev = next((d for d in reversed(detected_by_y) if int(d[2]) == m_int - 1), None)
+        nxt = next((d for d in detected_by_y if int(d[2]) == m_int + 1), None)
+
+        target_row_idx = None
+        target_col_idx = None
+        if nxt is not None:
+            # m은 nxt(=m+1) 직전 — 같은 행 nxt의 한 칸 왼쪽
+            target_row_idx = pos_to_row[nxt[2]]
+            target_col_idx = column_index(nxt[0]) - 1
+            if target_col_idx < 0:
+                # nxt가 행의 첫 칸이면 m은 이전 행 마지막 칸
+                target_row_idx -= 1
+                target_col_idx = len(col_slots) - 1
+        elif prev is not None:
+            target_row_idx = pos_to_row[prev[2]]
+            target_col_idx = column_index(prev[0]) + 1
+            if target_col_idx >= len(col_slots):
+                target_row_idx += 1
+                target_col_idx = 0
+
+        if target_row_idx is None or not (0 <= target_row_idx < len(row_info)):
+            continue
+        if not (0 <= target_col_idx < len(col_slots)):
+            continue
+        cy = row_info[target_row_idx][0]
+        cx = col_slots[target_col_idx]
+        inferred.append((cx, cy, m))
+    return inferred
+
+
 def _detect_circled_option(
     crop_bgr: np.ndarray, ocr_results: list
 ) -> Optional[str]:
-    """학생이 인쇄된 ①~⑤ 중 하나에 빨간/검은 동그라미 표시한 경우 검출.
-    1. 색마스크에서 큰 블롭(>500px) 찾고 원형(circularity>0.5) 필터
-    2. OCR 결과에서 ①~⑤ 위치 모음
-    3. 동그라미 중심에서 가장 가까운 옵션 → 해당 숫자 반환"""
+    """학생이 인쇄된 ①~⑤ 중 하나에 동그라미/체크 표시한 경우 검출.
+    1. 다크잉크 마스크 - (옵션 마커 외) 인쇄 OCR 박스 영역 = 손글씨 후보 픽셀
+    2. contour 추출 (circ/area 약한 임계값 — 체크 V도 포함)
+    3. OCR로 검출된 ①~⑤ + 누락 옵션의 추정 위치 모음
+    4. 가장 큰 contour 중심 → 가장 가까운 옵션 매칭"""
     h, w = crop_bgr.shape[:2]
-    mask = _detect_handwriting_mask(crop_bgr)
-    if mask.sum() < 500:
+    mask = _build_dark_ink_mask(crop_bgr, ocr_results, top_skip=60)
+    if mask.sum() < 100:
         return None
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    circle_centers: list[tuple[float, float, float]] = []  # (cx, cy, area)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask_closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(mask_closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    candidates: list[tuple[float, float, float]] = []  # (cx, cy, area)
     for c in contours:
         area = cv2.contourArea(c)
-        if area < 300:
+        if area < 80:
             continue
-        perim = cv2.arcLength(c, True)
-        if perim == 0:
+        x, y, bw, bh = cv2.boundingRect(c)
+        ratio = max(bw, bh) / max(1, min(bw, bh))
+        if ratio > 5.0:
             continue
-        circularity = 4 * np.pi * area / (perim * perim)
-        if circularity < 0.35:  # 너무 길쭉하면 글씨, 둥글면 동그라미
-            continue
-        (cx, cy), _r = cv2.minEnclosingCircle(c)
-        circle_centers.append((cx, cy, area))
+        (cx, cy), _ = cv2.minEnclosingCircle(c)
+        candidates.append((cx, cy, area))
 
-    if not circle_centers:
+    if not candidates:
         return None
 
-    # OCR 결과에서 ①~⑤ 위치 모으기
-    option_positions: list[tuple[float, float, str]] = []  # (cx, cy, digit)
+    # 검출된 ①~⑤ + 누락 옵션의 추정 위치
+    detected_options: list[tuple[float, float, str]] = []
     for box, text, _conf in ocr_results:
         for ch, digit in _OPTION_MARKS.items():
             if ch in text:
                 cx = sum(p[0] for p in box) / 4
                 cy = sum(p[1] for p in box) / 4
-                option_positions.append((cx, cy, digit))
+                detected_options.append((cx, cy, digit))
                 break
 
-    if not option_positions:
+    if not detected_options:
         return None
 
-    # 가장 큰 원형 블롭 → 가장 가까운 옵션
-    circle_centers.sort(key=lambda c: -c[2])
-    cx, cy, _ = circle_centers[0]
-    nearest = min(
-        option_positions,
-        key=lambda o: (o[0] - cx) ** 2 + (o[1] - cy) ** 2,
-    )
-    # 거리가 너무 멀면 매칭 무시
-    dist = ((nearest[0] - cx) ** 2 + (nearest[1] - cy) ** 2) ** 0.5
-    if dist > max(w, h) * 0.25:
-        return None
-    return nearest[2]
+    inferred = _infer_missing_option_positions(detected_options)
+    all_options = detected_options + inferred
+
+    # 가장 큰 candidate 우선
+    candidates.sort(key=lambda c: -c[2])
+    option_xs = [o[0] for o in all_options]
+    option_ys = [o[1] for o in all_options]
+    option_x1, option_x2 = min(option_xs), max(option_xs)
+    option_y1, option_y2 = min(option_ys), max(option_ys)
+    x_pad = max(50.0, w * 0.08)
+    y_pad = max(45.0, h * 0.08)
+    max_match_dist = max(42.0, min(w, h) * 0.06)
+
+    for cx, cy, area in candidates:
+        # 오른쪽 위에 따로 쓴 답안 숫자를 인쇄 선택지 근처 체크로 오판하지 않도록,
+        # contour 중심이 선택지 영역 근처에 있을 때만 객관식 표시로 인정한다.
+        if not (
+            option_x1 - x_pad <= cx <= option_x2 + x_pad
+            and option_y1 - y_pad <= cy <= option_y2 + y_pad
+        ):
+            continue
+        nearest = min(
+            all_options,
+            key=lambda o: (o[0] - cx) ** 2 + (o[1] - cy) ** 2,
+        )
+        dist = ((nearest[0] - cx) ** 2 + (nearest[1] - cy) ** 2) ** 0.5
+        # 인접 옵션과 충분히 가까워야 매칭 인정
+        if dist <= max_match_dist:
+            return nearest[2]
+    return None
 
 
 def extract_handwritten_answer_v2(crop_bgr: np.ndarray, problem_num: int = 0) -> str:
+    """편의 함수 — extract_handwritten_answer_v2_full(...)["answer"]만 반환."""
+    return extract_handwritten_answer_v2_full(crop_bgr, problem_num)["answer"]
+
+
+def extract_handwritten_answer_v2_full(crop_bgr: np.ndarray, problem_num: int = 0) -> dict:
     """v2: PaddleOCR(설치 시) → EasyOCR 순으로 시도 + 스마트 필터.
     - 인쇄된 문제번호("0815"), ①~⑤, 본문 한글 등 제거
     - 답 패턴(숫자/부등호/x) 통과 후보만 conf 순 정렬
     - 손글씨 OCR 흔한 패턴 정규화 적용 ("7∠" → "x<")
     - 모든 후보가 비면 v1 휴리스틱으로 폴백.
+
+    반환 dict:
+      - answer: 최종 답 문자열
+      - confidence: 0~1, 신뢰도 (-1: 알수없음)
+      - source: "circle"/"trailing"/"paddle"/"easy"/"v1-fallback"
+      - candidates: [{"text": str, "conf": float, "source": str}, ...] 후보 상위 5개
     """
     h, w = crop_bgr.shape[:2]
 
-    def _score_candidates(cands, all_boxes):
-        """conf + 고립도(주변 다른 박스에서 멀수록) 가중. 가장 높은 후보 반환."""
+    def _empty_result():
+        return {"answer": "", "confidence": -1.0, "source": "none", "candidates": []}
+
+    def _score_candidates(cands, all_boxes, source_label: str):
+        """conf + 고립도 가중. 점수 정렬된 (text, conf, score) 리스트 반환."""
         if not cands:
-            return None
+            return []
         scored = []
         for cy, cx, t, conf in cands:
             iso = _isolation_score(cy, cx, all_boxes)
-            iso_norm = min(iso / 100.0, 2.0)  # 100px 이상이면 만점, 200px 이상은 capped
+            iso_norm = min(iso / 100.0, 2.0)
             score = conf + 0.15 * iso_norm
-            scored.append((score, cy, cx, t, conf))
+            scored.append((score, t, conf, source_label))
         scored.sort(key=lambda s: -s[0])
-        return scored[0][3]
+        return scored
+
+    all_candidates: list[dict] = []
 
     # 1) PaddleOCR 우선
     paddle_res = _try_paddle_ocr(crop_bgr)
     if paddle_res is not None:
-        # 1a) 객관식 동그라미 표시 검출 (학생이 ①~⑤ 중 하나에 빨간 원)
-        # 단, 학생 마크가 검정 잉크인 경우 색마스크가 비어 None 반환됨
-        circled = _detect_circled_option(crop_bgr, paddle_res)
-        if circled:
-            return circled
+        # 옵션 마커 3개 이상 검출되면 객관식 문제로 간주
+        n_options = sum(
+            1 for _b, t, _c in paddle_res
+            if any(ch in (t or "") for ch in _OPTION_MARKS)
+        )
+        if n_options >= 3:
+            # 1a) 동그라미/체크 검출
+            circled = _detect_circled_option(crop_bgr, paddle_res)
+            if circled:
+                return {
+                    "answer": circled,
+                    "confidence": 0.85,
+                    "source": "circle",
+                    "candidates": [{"text": circled, "conf": 0.85, "source": "circle"}],
+                }
+            # 1b) 본문 끝 trailing 답
+            for box, text, conf in paddle_res:
+                if re.search(r"[가-힣]{2,}", text or ""):
+                    tail = _trailing_handwritten_answer(text)
+                    if tail and tail in "12345" and len(tail) == 1:
+                        return {
+                            "answer": tail,
+                            "confidence": float(conf) * 0.9,
+                            "source": "trailing",
+                            "candidates": [
+                                {"text": tail, "conf": float(conf) * 0.9, "source": "trailing"}
+                            ],
+                        }
         cands = _filter_handwritten_candidates(paddle_res, crop_bgr.shape, problem_num)
-        picked = _score_candidates(cands, paddle_res)
-        if picked:
-            return _normalize_handwriting_artifacts(picked)
+        scored = _score_candidates(cands, paddle_res, "paddle")
+        for _score, t, c, s in scored[:5]:
+            all_candidates.append({"text": _normalize_handwriting_artifacts(t), "conf": c, "source": s})
+        if scored:
+            top = scored[0]
+            return {
+                "answer": _normalize_handwriting_artifacts(top[1]),
+                "confidence": top[2],
+                "source": "paddle",
+                "candidates": all_candidates,
+            }
 
     # 2) EasyOCR 폴백 — 같은 필터 적용
     reader = _get_easyocr()
     easy_res = reader.readtext(crop_bgr)
     cands = _filter_handwritten_candidates(easy_res, crop_bgr.shape, problem_num)
-    picked = _score_candidates(cands, easy_res)
-    if picked:
-        return _normalize_handwriting_artifacts(picked)
+    scored = _score_candidates(cands, easy_res, "easy")
+    for _score, t, c, s in scored[:5]:
+        all_candidates.append({"text": _normalize_handwriting_artifacts(t), "conf": c, "source": s})
+    if scored:
+        top = scored[0]
+        return {
+            "answer": _normalize_handwriting_artifacts(top[1]),
+            "confidence": top[2],
+            "source": "easy",
+            "candidates": all_candidates,
+        }
 
-    # 3) 최종 폴백: v1 휴리스틱
-    return extract_handwritten_answer(crop_bgr)
+    # 3) v1 폴백
+    v1 = extract_handwritten_answer(crop_bgr)
+    return {
+        "answer": v1,
+        "confidence": -1.0,
+        "source": "v1-fallback",
+        "candidates": [{"text": v1, "conf": -1.0, "source": "v1-fallback"}] if v1 else [],
+    }
 
 
 def extract_handwritten_answer_trocr(crop_bgr: np.ndarray) -> str:
@@ -639,8 +950,9 @@ def extract_handwritten_answer_trocr(crop_bgr: np.ndarray) -> str:
 
 
 def normalize(s) -> str:
-    s = str(s).strip().lower()
-    s = s.replace("−", "-").replace(" ", "")
+    s = _normalize_handwriting_artifacts(str(s)).strip().lower()
+    s = re.sub(r"\s+", "", s)
+    s = s.strip(".,;:()[]{}")
     return s
 
 
@@ -680,8 +992,10 @@ def grade_page(image_rgb: np.ndarray, answer_dict: dict, return_debug: bool = Fa
             else:
                 y2 = h
             crop = image_bgr[y1:y2, cx1:cx2]
+            answer_focus = _answer_focus_crop(crop)
 
-            student_ans = extract_handwritten_answer_v2(crop, problem_num=a["num"])
+            extract = extract_handwritten_answer_v2_full(crop, problem_num=a["num"])
+            student_ans = extract["answer"]
             correct_ans = answer_dict.get(a["num"])
             is_correct = normalize(student_ans) == normalize(correct_ans)
 
@@ -692,7 +1006,15 @@ def grade_page(image_rgb: np.ndarray, answer_dict: dict, return_debug: bool = Fa
                     "student_answer": student_ans,
                     "correct_answer": str(correct_ans),
                     "correct": is_correct,
+                    "confidence": extract["confidence"],
+                    "source": extract["source"],
+                    "candidates": extract["candidates"],
                     "crop_rgb": cv2.cvtColor(crop, cv2.COLOR_BGR2RGB),
+                    "answer_crop_rgb": (
+                        cv2.cvtColor(answer_focus, cv2.COLOR_BGR2RGB)
+                        if answer_focus is not None
+                        else None
+                    ),
                 }
             )
 
