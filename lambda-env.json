@@ -1,0 +1,7 @@
+{
+  "Variables": {
+    "AI_GRADING_MODE": "bedrock",
+    "CROPS_BUCKET": "checkmate-crops-259808926999",
+    "APP_INTERNAL_TOKEN": "change-me-in-prod"
+  }
+}

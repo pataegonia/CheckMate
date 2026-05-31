@@ -9,3 +9,4 @@ pillow>=10.0
 numpy>=1.24,<2.0
 pymupdf>=1.24
 boto3>=1.34
+pydantic>=2.7

@@ -1,0 +1,9 @@
+pydantic>=2.7,<3
+Pillow>=10,<11
+numpy>=1.24,<2.0
+opencv-python-headless>=4.8,<5
+# torch CPU build is installed in Dockerfile via --index-url
+torch==2.2.2
+torchvision==0.17.2
+easyocr>=1.7,<2
+transformers>=4.40,<5

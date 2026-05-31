@@ -1,0 +1,27 @@
+{
+  "submission": {
+    "submissionId": 9999,
+    "studentId": "smoke-test",
+    "image": {
+      "bucket": "checkmate-crops-259808926999",
+      "key": "samples/Notes_260430_p1.png",
+      "contentType": "image/png"
+    }
+  },
+  "assignment": {
+    "assignmentId": 1
+  },
+  "questions": [
+    {
+      "questionId": 1,
+      "orderNum": 1,
+      "type": "descriptive",
+      "expectedAnswer": "2",
+      "maxScore": 10,
+      "gradingCriteria": "풀이와 답 기준"
+    }
+  ],
+  "callback": {
+    "url": "https://webhook.site/c19e499d-894a-405a-9384-235673c1ab0a"
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadSubmissionImages",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::REPLACE-submission-bucket/*"
+      ]
+    },
+    {
+      "Sid": "WriteGradedCrops",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::REPLACE-crops-bucket/*"
+      ]
+    },
+    {
+      "Sid": "InvokeBedrockClaude",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-6-*",
+        "arn:aws:bedrock:us-east-1:259808926999:inference-profile/us.anthropic.claude-sonnet-4-6*"
+      ]
+    }
+  ]
+}

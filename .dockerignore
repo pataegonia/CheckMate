@@ -1,0 +1,34 @@
+.git/
+.venv/
+.claude/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+build/
+debug_out/
+samples/
+tests/
+docs/
+scripts/
+streamlit.*.log
+*.md
+AI_WORKPLAN.md
+AWS_BEDROCK_SETUP.md
+README.md
+
+# Streamlit / dev-only sources not used by the Lambda handler
+app.py
+ai_grader.py
+answers.py
+bench.py
+bench_paddle.py
+debug_circle.py
+debug_mask.py
+diagnose.py
+paddle_ocr.py
+
+# Mock-only artifacts
+requirements-lambda-mock.txt
+requirements-lambda-bedrock.txt
+requirements.txt
