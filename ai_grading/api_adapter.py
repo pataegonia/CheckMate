@@ -118,10 +118,12 @@ def post_callback(
             return response.status, response.read().decode("utf-8", errors="replace")
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        response_headers = dict(exc.headers) if exc.headers else {}
+        LOGGER.error(
+            "BE callback %s returned HTTP %s. body=%r headers=%r",
+            url, exc.code, detail, response_headers,
+        )
         if exc.code in IDEMPOTENT_4XX_CODES:
-            LOGGER.warning(
-                "BE callback returned non-retryable %s: %s", exc.code, detail
-            )
             return exc.code, detail
         raise RuntimeError(f"BE callback {url} failed: HTTP {exc.code} {detail}") from exc
     except URLError as exc:

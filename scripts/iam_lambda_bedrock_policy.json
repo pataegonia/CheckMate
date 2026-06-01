@@ -8,7 +8,7 @@
         "s3:GetObject"
       ],
       "Resource": [
-        "arn:aws:s3:::REPLACE-submission-bucket/*"
+        "arn:aws:s3:::checkmate-bucket-g/*"
       ]
     },
     {
@@ -18,7 +18,7 @@
         "s3:PutObject"
       ],
       "Resource": [
-        "arn:aws:s3:::REPLACE-crops-bucket/*"
+        "arn:aws:s3:::checkmate-crops-259808926999/*"
       ]
     },
     {

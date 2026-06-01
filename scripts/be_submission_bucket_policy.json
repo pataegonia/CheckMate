@@ -1,0 +1,14 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowCheckmateLambdaRead",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::259808926999:role/Checkmate-lambda-execution-role"
+      },
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::checkmate-bucket-g/*"
+    }
+  ]
+}

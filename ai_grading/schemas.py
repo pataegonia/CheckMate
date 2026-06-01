@@ -77,7 +77,7 @@ class GradingRequest(BaseModel):
     job_type: JobType = Field(alias="jobType")
     submission_id: str | int = Field(alias="submissionId")
     assignment_id: str | int = Field(alias="assignmentId")
-    student_id: str = Field(default="unknown", alias="studentId")
+    student_id: str | int = Field(default="unknown", alias="studentId")
     student_name: str | None = Field(default=None, alias="studentName")
     assignment_title: str | None = Field(default=None, alias="assignmentTitle")
     s3: S3ImageInput | None = None
